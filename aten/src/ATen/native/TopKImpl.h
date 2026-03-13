@@ -10,9 +10,9 @@ inline namespace CPU_CAPABILITY {
 inline namespace DEFAULT {
 #endif
 
-template <typename scalar_t, bool largest>
+template <typename T, bool largest>
 struct TopKComparator {
-  bool operator()(const scalar_t& lhs, const scalar_t& rhs) const {
+  bool operator()(const T& lhs, const T& rhs) const {
     if constexpr (largest) {
       return (_isnan(lhs.first) && !_isnan(rhs.first)) ||
           (lhs.first > rhs.first);
@@ -65,16 +65,17 @@ void topk_impl_loop(
     }
 
     // we want nan to be sorted as top for numpy compatibility
-    if (use_partial_sort) {
-      auto queue_begin = queue.begin();
-      auto queue_end = queue.begin() + k;
-      auto& queue_front_ref = queue.front();
-      auto& queue_back_ref = queue.back();
+    auto select_topk = [&]<bool is_largest>() {
+      auto comp = TopKComparator<elem_t, is_largest>{};
+      if (use_partial_sort) {
+        auto queue_begin = queue.begin();
+        auto queue_end = queue.begin() + k;
+        auto& queue_front_ref = queue.front();
+        // pop_heap moves old front to queue[k-1], so back() is the
+        // eviction slot we overwrite before push_heap
+        auto& queue_back_ref = queue.back();
 
-      if (largest) {
-        auto comp = TopKComparator<elem_t, true>{};
         std::make_heap(queue_begin, queue_end, comp);
-
         for (auto idx = k; idx < dim_size; ++idx) {
           elem_t this_val{tmp_values[idx], idx};
           if (comp(this_val, queue_front_ref)) {
@@ -83,43 +84,21 @@ void topk_impl_loop(
             std::push_heap(queue_begin, queue_end, comp);
           }
         }
-
         if (sorted) {
           std::sort_heap(queue_begin, queue_end, comp);
         }
       } else {
-        auto comp = TopKComparator<elem_t, false>{};
-        std::make_heap(queue_begin, queue_end, comp);
-
-        for (auto idx = k; idx < dim_size; ++idx) {
-          elem_t this_val{tmp_values[idx], idx};
-          if (comp(this_val, queue_front_ref)) {
-            std::pop_heap(queue_begin, queue_end, comp);
-            queue_back_ref = this_val;
-            std::push_heap(queue_begin, queue_end, comp);
-          }
-        }
-
+        std::nth_element(
+            queue.begin(), queue.begin() + k - 1, queue.end(), comp);
         if (sorted) {
-          std::sort_heap(queue_begin, queue_end, comp);
+          std::sort(queue.begin(), queue.begin() + k - 1, comp);
         }
       }
+    };
+    if (largest) {
+      select_topk.template operator()<true>();
     } else {
-      if (largest) {
-        auto comp = TopKComparator<elem_t, true>{};
-        std::nth_element(
-            queue.begin(), queue.begin() + k - 1, queue.end(), comp);
-        if (sorted) {
-          std::sort(queue.begin(), queue.begin() + k - 1, comp);
-        }
-      } else {
-        auto comp = TopKComparator<elem_t, false>{};
-        std::nth_element(
-            queue.begin(), queue.begin() + k - 1, queue.end(), comp);
-        if (sorted) {
-          std::sort(queue.begin(), queue.begin() + k - 1, comp);
-        }
-      }
+      select_topk.template operator()<false>();
     }
 
     for (const auto j : c10::irange(k)) {
